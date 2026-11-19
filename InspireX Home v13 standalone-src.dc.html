@@ -634,63 +634,227 @@ class Component extends DCLogic {
     this.wrap = wrap;
     const ctx = c.getContext('2d');
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const N = Math.max(300, Math.min(3000, this.props.particles ?? 1700));
-    const parts = [];
-    for (let i = 0; i < N; i++) {
-      const t = Math.random() * Math.PI * 12;
-      const r = Math.exp(Math.cos(t)) - 2 * Math.cos(4 * t) - Math.pow(Math.sin(t / 12), 5);
-      const k = i % 4 === 0 ? 0.25 + Math.random() * 0.7 : 0.97 + Math.random() * 0.06;
-      parts.push({ bx: Math.sin(t) * r * k, by: Math.cos(t) * r * k, x: 0, y: 0, vx: 0, vy: 0, s: Math.random() < 0.15 ? 2.4 : 1.5 });
-    }
-    let W = 0, H = 0, first = !reduce;
-    const mouse = { x: -9999, y: -9999 };
-    const geo = () => { const n = W < 900; return { cx: W * 0.5, cy: H * (n ? 0.6 : 0.6), s: Math.min(W * (n ? 0.11 : 0.07), H * 0.095) }; };
-    const target = (p, g, time) => { const f = 0.78 + 0.22 * Math.cos(time * 1.7); return { x: g.cx + p.bx * f * g.s, y: g.cy - (p.by - 1.1) * g.s + Math.sin(time * 0.6) * 10 }; };
-    const cols = ['rgba(0,185,254,.9)', 'rgba(0,185,254,.9)', 'rgba(1,117,169,.85)', 'rgba(128,220,254,.95)'];
-    const draw = (time, still) => {
-      const g = geo();
-      ctx.clearRect(0, 0, W, H);
-      const buckets = [[], [], [], []];
-      parts.forEach((p) => {
-        if (!still) {
-          const t = target(p, g, time), k = time < 0.8 ? 0.0015 : 0.014;
-          p.vx += (t.x - p.x) * k; p.vy += (t.y - p.y) * k;
-          const dx = p.x - mouse.x, dy = p.y - mouse.y, d = Math.sqrt(dx * dx + dy * dy);
-          if (d < 140 && d > 0.1) { const f = ((140 - d) / 140) * 2.4; p.vx += (dx / d) * f; p.vy += (dy / d) * f; }
-          p.vx *= 0.86; p.vy *= 0.86; p.x += p.vx; p.y += p.vy;
-        }
-        buckets[Math.max(0, Math.min(3, Math.floor(((p.bx + 3.4) / 6.8) * 4)))].push(p);
-      });
-      buckets.forEach((list, i) => { ctx.fillStyle = cols[i]; ctx.beginPath(); list.forEach((p) => ctx.rect(p.x, p.y, p.s, p.s)); ctx.fill(); });
-      if (mouse.x > -999) {
-        ctx.lineWidth = 0.6; let n = 0;
-        for (let i = 0; i < parts.length && n < 40; i += 3) {
-          const p = parts[i], dx = p.x - mouse.x, dy = p.y - mouse.y, d2 = dx * dx + dy * dy;
-          if (d2 < 30000) { n++; ctx.strokeStyle = 'rgba(128,220,254,' + (0.55 - d2 / 60000) + ')'; ctx.beginPath(); ctx.moveTo(mouse.x, mouse.y); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+    // Growth scene: glass bar chart, a rising arrow and a butterfly that follows the pointer.
+    const TAU = Math.PI * 2, rnd = Math.random;
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const out3 = (k) => 1 - Math.pow(1 - k, 3);
+    const back = (k) => { const s = 1.5; k -= 1; return 1 + (s + 1) * k * k * k + s * k * k; };
+    const VALS = [0.16, 0.24, 0.31, 0.42, 0.53, 0.69, 0.88];
+    const TAGS = ['+12%', '+19%', '+27%', '+38%', '+51%', '+74%', '3.2x'];
+    const bars = VALS.map((v) => ({ v, lift: 0, lv: 0, glow: 0 }));
+    const dust = [], sparks = [];
+    for (let i = 0; i < 130; i++) dust.push({ x: rnd(), y: rnd(), z: 0.3 + rnd() * 0.7, ox: 0, oy: 0, ph: rnd() * TAU });
+    const mouse = { x: -9999, y: -9999, on: false, px: 0, py: 0 };
+    const bf = { x: 0, y: 0, vx: 0, vy: 0, flap: 0, tilt: 0 };
+    let W = 0, H = 0, now = 0, last = 0, growAt = 0, from = 0, hover = -1, placed = false;
+    const geo = () => {
+      const mob = W < 900;
+      const left = mob ? W * 0.05 : W * 0.3, right = mob ? W * 0.9 : W * 0.735;
+      const base = mob ? H * 0.8 : H * 0.84, maxH = mob ? H * 0.3 : H * 0.47;
+      const slot = (right - left) / bars.length, bw = slot * 0.6, d = Math.min(bw * 0.42, 24);
+      return { mob, left, right, base, maxH, slot, bw, d, ox: mouse.px * 14, oy: mouse.py * 7 };
+    };
+    const barH = (g, i, t) => {
+      const k = clamp((t - growAt - 0.35 - i * 0.11) / 1.05, 0, 1);
+      return g.maxH * bars[i].v * (from + (1 - from) * back(k)) + bars[i].lift;
+    };
+    const arrowPt = (g, u) => {
+      const x0 = g.left - g.slot * 0.2, x1 = g.right + g.slot * 0.15;
+      return [x0 + (x1 - x0) * u + g.ox, g.base - g.maxH * (0.07 + 1.02 * Math.pow(u, 1.7)) + g.oy];
+    };
+    const spark = (x, y, n, spd, life) => {
+      for (let i = 0; i < n && sparks.length < 520; i++) {
+        const a = rnd() * TAU, v = rnd() * spd;
+        sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - spd * 0.15, life: 0, max: life * (0.5 + rnd()), s: 0.6 + rnd() * 1.6, gold: rnd() < 0.3 });
+      }
+    };
+    const rays = (g, t) => {
+      const ox = W * 0.9 - g.ox * 2, oy = -H * 0.15;
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 5; i++) {
+        const a = 1.95 + i * 0.13 + Math.sin(t * 0.25 + i * 1.7) * 0.03, w = 0.035 + (i % 2) * 0.025, L = H * 1.6;
+        const gr = ctx.createLinearGradient(ox, oy, ox + Math.cos(a) * L, oy + Math.sin(a) * L);
+        gr.addColorStop(0, 'rgba(128,220,254,0)'); gr.addColorStop(0.45, 'rgba(128,220,254,' + (0.05 + 0.03 * Math.sin(t * 0.6 + i)) + ')'); gr.addColorStop(1, 'rgba(0,185,254,0)');
+        ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(ox, oy);
+        ctx.lineTo(ox + Math.cos(a - w) * L, oy + Math.sin(a - w) * L); ctx.lineTo(ox + Math.cos(a + w) * L, oy + Math.sin(a + w) * L); ctx.closePath(); ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    };
+    const drawBars = (g, t) => {
+      const { bw, d, base } = g;
+      for (let i = 0; i < bars.length; i++) {
+        const b = bars[i], h = barH(g, i, t);
+        if (h < 1) continue;
+        const x = g.left + i * g.slot + (g.slot - bw) / 2 + g.ox * (0.6 + i * 0.08), y = base - h + g.oy, by = base + g.oy, e = d * 0.6, gl = b.glow;
+        // reflection on the floor
+        const rf = ctx.createLinearGradient(0, by, 0, by + h * 0.3);
+        rf.addColorStop(0, 'rgba(128,220,254,' + (0.16 + gl * 0.12) + ')'); rf.addColorStop(1, 'rgba(128,220,254,0)');
+        ctx.fillStyle = rf; ctx.fillRect(x, by + 2, bw, h * 0.3);
+        // side face
+        ctx.fillStyle = 'rgba(1,117,169,' + (0.32 + gl * 0.2) + ')';
+        ctx.beginPath(); ctx.moveTo(x + bw, y); ctx.lineTo(x + bw + d, y - e); ctx.lineTo(x + bw + d, by - e); ctx.lineTo(x + bw, by); ctx.closePath(); ctx.fill();
+        // front face (glass)
+        const fg = ctx.createLinearGradient(0, y, 0, by);
+        fg.addColorStop(0, 'rgba(219,245,255,' + (0.5 + gl * 0.35) + ')'); fg.addColorStop(0.35, 'rgba(128,220,254,' + (0.22 + gl * 0.2) + ')'); fg.addColorStop(1, 'rgba(0,185,254,' + (0.06 + gl * 0.1) + ')');
+        ctx.fillStyle = fg; ctx.fillRect(x, y, bw, h);
+        ctx.strokeStyle = 'rgba(219,245,255,' + (0.55 + gl * 0.4) + ')'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, bw - 1, h - 1);
+        // inner light streak
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.35 + gl * 0.4) + ')'; ctx.fillRect(x + bw * 0.14, y + 4, Math.max(1.5, bw * 0.05), h - 8);
+        // top face
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.62 + gl * 0.35) + ')';
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + d, y - e); ctx.lineTo(x + bw + d, y - e); ctx.lineTo(x + bw, y); ctx.closePath(); ctx.fill();
+        if (gl > 0.02) {
+          ctx.globalCompositeOperation = 'lighter';
+          const hg = ctx.createRadialGradient(x + bw / 2, y, 0, x + bw / 2, y, bw * 1.4);
+          hg.addColorStop(0, 'rgba(0,185,254,' + 0.45 * gl + ')'); hg.addColorStop(1, 'rgba(0,185,254,0)');
+          ctx.fillStyle = hg; ctx.fillRect(x - bw, y - bw * 1.4, bw * 3, bw * 2.8);
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = gl; ctx.font = '500 13px "Geist Mono",monospace'; ctx.textAlign = 'center';
+          ctx.fillStyle = '#FFFFFF'; ctx.fillText(TAGS[i], x + bw / 2 + d / 2, y - e - 12); ctx.globalAlpha = 1;
         }
       }
+    };
+    const drawArrow = (g, t) => {
+      const p = out3(clamp((t - growAt - 1.15) / 1.5, 0, 1));
+      if (p <= 0) return null;
+      const n = 70, pts = [];
+      for (let i = 0; i <= n; i++) pts.push(arrowPt(g, (i / n) * p));
+      const line = (w, col, blur) => { ctx.lineWidth = w; ctx.strokeStyle = col; ctx.shadowBlur = blur; ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke(); };
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.shadowColor = '#00B9FE';
+      line(g.mob ? 12 : 18, 'rgba(128,220,254,.18)', 0);
+      line(g.mob ? 5 : 7, 'rgba(0,185,254,.55)', 24);
+      line(g.mob ? 2 : 2.5, 'rgba(255,255,255,.95)', 12);
+      const [hx, hy] = pts[n], [qx, qy] = pts[n - 3], a = Math.atan2(hy - qy, hx - qx), s = g.mob ? 14 : 20;
+      ctx.fillStyle = 'rgba(219,245,255,.95)'; ctx.shadowBlur = 22;
+      ctx.beginPath(); ctx.moveTo(hx + Math.cos(a) * s, hy + Math.sin(a) * s);
+      ctx.lineTo(hx + Math.cos(a + 2.5) * s, hy + Math.sin(a + 2.5) * s); ctx.lineTo(hx + Math.cos(a) * s * -0.15, hy + Math.sin(a) * s * -0.15);
+      ctx.lineTo(hx + Math.cos(a - 2.5) * s, hy + Math.sin(a - 2.5) * s); ctx.closePath(); ctx.fill();
+      ctx.shadowBlur = 0;
+      if (p >= 1) {
+        // flare at the tip
+        const fx = hx + Math.cos(a) * s * 0.9, fy = hy + Math.sin(a) * s * 0.9, pulse = 0.8 + 0.2 * Math.sin(t * 3), R = (g.mob ? 50 : 80) * pulse;
+        ctx.globalCompositeOperation = 'lighter';
+        const fl = ctx.createRadialGradient(fx, fy, 0, fx, fy, R);
+        fl.addColorStop(0, 'rgba(255,255,255,.95)'); fl.addColorStop(0.15, 'rgba(128,220,254,.55)'); fl.addColorStop(1, 'rgba(0,185,254,0)');
+        ctx.fillStyle = fl; ctx.beginPath(); ctx.arc(fx, fy, R, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(219,245,255,.55)'; ctx.lineWidth = 1.2;
+        for (let k = 0; k < 4; k++) { const r = t * 0.3 + (k * Math.PI) / 4, L = R * (k % 2 ? 0.7 : 1.3); ctx.beginPath(); ctx.moveTo(fx - Math.cos(r) * L, fy - Math.sin(r) * L); ctx.lineTo(fx + Math.cos(r) * L, fy + Math.sin(r) * L); ctx.stroke(); }
+        ctx.globalCompositeOperation = 'source-over';
+        return [fx, fy];
+      }
+      return [hx, hy];
+    };
+    const drawButterfly = (g) => {
+      const s = g.mob ? 16 : 26, open = 0.3 + 0.7 * Math.abs(Math.cos(bf.flap));
+      ctx.save(); ctx.translate(bf.x, bf.y); ctx.rotate(bf.tilt);
+      ctx.shadowColor = '#80DCFE'; ctx.shadowBlur = 26;
+      for (const side of [-1, 1]) {
+        ctx.save(); ctx.scale(side * open, 1);
+        const wg = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 2);
+        wg.addColorStop(0, 'rgba(255,255,255,.98)'); wg.addColorStop(0.35, 'rgba(128,220,254,.95)'); wg.addColorStop(0.75, 'rgba(0,185,254,.9)'); wg.addColorStop(1, 'rgba(1,117,169,.85)');
+        ctx.fillStyle = wg; ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 0.8 / Math.max(0.3, open);
+        ctx.beginPath(); ctx.moveTo(0, -s * 0.1); ctx.bezierCurveTo(s * 0.5, -s * 1.7, s * 2.1, -s * 1.6, s * 1.75, -s * 0.35); ctx.bezierCurveTo(s * 1.55, s * 0.05, s * 0.6, s * 0.1, 0, 0); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, s * 0.05); ctx.bezierCurveTo(s * 1.3, s * 0.15, s * 1.35, s * 1.15, s * 0.7, s * 1.2); ctx.bezierCurveTo(s * 0.3, s * 1.25, s * 0.1, s * 0.6, 0, s * 0.2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.arc(s * 1.2, -s * 0.75, s * 0.13, 0, TAU); ctx.fill();
+        ctx.restore();
+      }
+      ctx.shadowBlur = 0; ctx.fillStyle = '#022D4F';
+      ctx.beginPath(); ctx.ellipse(0, s * 0.15, s * 0.11, s * 0.62, 0, 0, TAU); ctx.fill();
+      ctx.strokeStyle = 'rgba(219,245,255,.8)'; ctx.lineWidth = 0.9;
+      ctx.beginPath(); ctx.moveTo(0, -s * 0.4); ctx.quadraticCurveTo(-s * 0.2, -s * 0.9, -s * 0.45, -s * 1.05); ctx.moveTo(0, -s * 0.4); ctx.quadraticCurveTo(s * 0.2, -s * 0.9, s * 0.45, -s * 1.05); ctx.stroke();
+      ctx.restore();
+    };
+    const step = (t, dt) => {
+      const g = geo();
+      // parallax eases toward the pointer
+      const tx = mouse.on ? clamp((mouse.x / W) * 2 - 1, -1, 1) : 0, ty = mouse.on ? clamp((mouse.y / H) * 2 - 1, -1, 1) : 0;
+      mouse.px += (tx - mouse.px) * Math.min(1, dt * 3); mouse.py += (ty - mouse.py) * Math.min(1, dt * 3);
+      // hovered bar lifts and glows
+      hover = -1;
+      if (mouse.on) for (let i = 0; i < bars.length; i++) {
+        const x = g.left + i * g.slot + g.ox * (0.6 + i * 0.08), h = barH(g, i, t);
+        if (mouse.x > x && mouse.x < x + g.slot && mouse.y > g.base - h - 50 + g.oy && mouse.y < g.base + 16 + g.oy) hover = i;
+      }
+      bars.forEach((b, i) => {
+        const on = i === hover ? 1 : 0;
+        b.lv += ((on ? 22 : 0) - b.lift) * dt * 60 * 0.012; b.lv *= Math.pow(0.82, dt * 60); b.lift += b.lv * dt * 60;
+        b.glow += (on - b.glow) * Math.min(1, dt * 8);
+      });
+      // butterfly steers toward the pointer, or loops around the chart when idle
+      let gx, gy;
+      if (mouse.on) { gx = mouse.x + 26; gy = mouse.y - 34; }
+      else { const cx = (g.left + g.right) / 2, cy = g.base - g.maxH * 0.72; gx = cx + Math.sin(t * 0.42) * (g.right - g.left) * 0.42; gy = cy + Math.sin(t * 0.84) * g.maxH * 0.32; }
+      const ax = (gx - bf.x) * 2.6 + Math.sin(t * 2.3) * 40, ay = (gy - bf.y) * 2.6 + Math.cos(t * 3.1) * 40;
+      bf.vx = (bf.vx + ax * dt) * Math.pow(0.12, dt); bf.vy = (bf.vy + ay * dt) * Math.pow(0.12, dt);
+      bf.x += bf.vx * dt; bf.y += bf.vy * dt;
+      const sp = Math.hypot(bf.vx, bf.vy);
+      bf.flap += dt * (9 + Math.min(14, sp * 0.03)); bf.tilt += (clamp(bf.vx * 0.0015, -0.45, 0.45) - bf.tilt) * Math.min(1, dt * 6);
+      if (rnd() < dt * (14 + Math.min(40, sp * 0.08))) spark(bf.x - bf.vx * 0.02, bf.y + 6, 1, 26, 1.3);
+      // dust drifts upward and parts around the pointer
+      dust.forEach((p) => {
+        p.y -= dt * 0.006 * p.z; if (p.y < -0.02) { p.y = 1.02; p.x = rnd(); }
+        const px = p.x * W + Math.sin(t * 0.3 + p.ph) * 18 * p.z, py = p.y * H;
+        const dx = px + p.ox - mouse.x, dy = py + p.oy - mouse.y, dd = Math.hypot(dx, dy);
+        if (mouse.on && dd < 130 && dd > 0.1) { const f = ((130 - dd) / 130) * 140 * dt; p.ox += (dx / dd) * f; p.oy += (dy / dd) * f; }
+        p.ox *= Math.pow(0.2, dt); p.oy *= Math.pow(0.2, dt);
+      });
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const s = sparks[i]; s.life += dt; if (s.life > s.max) { sparks.splice(i, 1); continue; }
+        s.vx *= Math.pow(0.4, dt); s.vy = s.vy * Math.pow(0.4, dt) + 12 * dt; s.x += s.vx * dt; s.y += s.vy * dt;
+      }
+    };
+    const draw = (t) => {
+      const g = geo();
+      ctx.clearRect(0, 0, W, H);
+      rays(g, t);
+      ctx.globalCompositeOperation = 'lighter';
+      dust.forEach((p) => {
+        const x = p.x * W + Math.sin(t * 0.3 + p.ph) * 18 * p.z + p.ox + g.ox * p.z, y = p.y * H + p.oy;
+        const a = (0.18 + 0.3 * p.z) * (0.6 + 0.4 * Math.sin(t * 1.3 + p.ph)) * clamp((y / H - 0.35) * 2.5, 0, 1);
+        ctx.fillStyle = 'rgba(128,220,254,' + a + ')'; ctx.beginPath(); ctx.arc(x, y, 0.6 + p.z * 1.6, 0, TAU); ctx.fill();
+      });
+      ctx.globalCompositeOperation = 'source-over';
+      drawBars(g, t);
+      const tip = drawArrow(g, t);
+      if (tip && !reduce && rnd() < 0.5) spark(tip[0], tip[1], 1, 40, 1.1);
+      ctx.globalCompositeOperation = 'lighter';
+      sparks.forEach((s) => {
+        const k = 1 - s.life / s.max, tw = 0.6 + 0.4 * Math.sin(s.life * 18 + s.s * 9);
+        ctx.fillStyle = s.gold ? 'rgba(255,226,160,' + k * tw + ')' : 'rgba(219,245,255,' + k * tw + ')';
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.s * (0.5 + k * 0.6), 0, TAU); ctx.fill();
+      });
+      ctx.globalCompositeOperation = 'source-over';
+      drawButterfly(g);
     };
     const resize = () => {
       const r = c.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
       W = r.width; H = r.height; c.width = W * dpr; c.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const g = geo();
-      if (first) { first = false; parts.forEach((p) => { p.x = Math.random() * W; p.y = H * 0.4 + Math.random() * H * 0.6; }); }
-      else parts.forEach((p) => { const t = target(p, g, 0); p.x = t.x; p.y = t.y; });
-      draw(0, true);
+      if (!placed) { placed = true; const g = geo(); bf.x = reduce ? (g.left + g.right) / 2 : g.left - 40; bf.y = g.base - g.maxH * (reduce ? 0.8 : 0.4); }
+      if (reduce) { step(10, 0); draw(10); }
     };
-    this.onMove = (e) => { const r = c.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; };
-    this.onLeave = () => { mouse.x = mouse.y = -9999; };
-    this.onClick = (e) => { if (e.target.closest('a,button')) return; parts.forEach((p) => { p.vx += (Math.random() - 0.5) * 60; p.vy += (Math.random() - 0.5) * 60; }); };
+    this.onMove = (e) => { const r = c.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; mouse.on = true; };
+    this.onLeave = () => { mouse.on = false; mouse.x = mouse.y = -9999; };
+    this.onClick = (e) => {
+      if (e.target.closest('a,button') || reduce) return;
+      const r = c.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      spark(x, y, 70, 260, 1.4);
+      bf.vx += (bf.x - x) * 3; bf.vy += (bf.y - y) * 3 - 200;
+      if (now - growAt > 2.6) { from = 0.3; growAt = now; }
+    };
     wrap.addEventListener('pointermove', this.onMove); wrap.addEventListener('pointerleave', this.onLeave); wrap.addEventListener('click', this.onClick);
     this.ro = new ResizeObserver(resize); this.ro.observe(c);
     resize();
-    if (reduce) { parts.forEach((p) => { const t = target(p, geo(), 0); p.x = t.x; p.y = t.y; }); draw(0, true); return; }
+    if (reduce) return;
     let visible = true, running = false;
     const t0 = performance.now();
     const loop = () => {
-      if (running || this.dead) return; running = true;
-      const step = (now) => { if (!visible || this.dead) { running = false; return; } draw((now - t0) / 1000, false); this.raf = requestAnimationFrame(step); };
-      this.raf = requestAnimationFrame(step);
+      if (running || this.dead) return; running = true; last = performance.now();
+      const tick = (ms) => {
+        if (!visible || this.dead) { running = false; return; }
+        const dt = Math.min(1 / 30, Math.max(0, (ms - last) / 1000)); last = ms; now = (ms - t0) / 1000;
+        step(now, dt); draw(now); this.raf = requestAnimationFrame(tick);
+      };
+      this.raf = requestAnimationFrame(tick);
     };
     this.io = new IntersectionObserver((es) => { visible = es[0].isIntersecting; if (visible) loop(); }); this.io.observe(c);
     loop();
